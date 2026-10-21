@@ -6,3 +6,4 @@ __pycache__/
 .aws-sam/
 .pytest_cache/
 .coverage
+data/output/
