@@ -1,0 +1,149 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Cloud data migration and validation platform
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment
+
+Resources:
+  MigrationDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+        - Key: Project
+          Value: CloudDataMigrationPlatform
+        - Key: Environment
+          Value: !Ref Environment
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  CustomerValidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-customer-validation'
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      CodeUri: ../src/lambda/
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref MigrationDataBucket
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: ReadRawCustomerFile
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub '${MigrationDataBucket.Arn}/raw/*'
+            - Sid: WriteProcessedCustomerFiles
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub '${MigrationDataBucket.Arn}/curated/*'
+                - !Sub '${MigrationDataBucket.Arn}/rejected/*'
+      Tags:
+        Project: CloudDataMigrationPlatform
+        Environment: !Ref Environment
+    
+  AccountValidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-account-validation'
+      Runtime: python3.12
+      Handler: account_handler.lambda_handler
+      CodeUri: ../src/lambda/
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref MigrationDataBucket
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: ReadRawAccountsAndValidatedCustomers
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub '${MigrationDataBucket.Arn}/raw/*'
+                - !Sub '${MigrationDataBucket.Arn}/curated/*'
+            - Sid: WriteProcessedAccountFiles
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub '${MigrationDataBucket.Arn}/curated/*'
+                - !Sub '${MigrationDataBucket.Arn}/rejected/*'
+      Tags:
+        Project: CloudDataMigrationPlatform
+        Environment: !Ref Environment
+ 
+  MigrationWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub '${AWS::StackName}-migration-workflow'
+      Type: STANDARD
+      Definition:
+        Comment: Validate customer and account migration data
+        StartAt: ValidateCustomers
+        States:
+          ValidateCustomers:
+            Type: Task
+            Resource: !GetAtt CustomerValidationFunction.Arn
+            ResultPath: $.customerResult
+            Next: ValidateAccounts
+
+          ValidateAccounts:
+            Type: Task
+            Resource: !GetAtt AccountValidationFunction.Arn
+            ResultPath: $.accountResult
+            End: true
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CustomerValidationFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AccountValidationFunction
+      Tags:
+        Project: CloudDataMigrationPlatform
+        Environment: !Ref Environment
+
+
+
+Outputs:
+  MigrationDataBucketName:
+    Description: S3 bucket for migration project data
+    Value: !Ref MigrationDataBucket
+
+  CustomerValidationFunctionName:
+    Description: Lambda function for validating customer records
+    Value: !Ref CustomerValidationFunction
+ 
+  AccountValidationFunctionName:
+    Description: Lambda function for validating account records
+    Value: !Ref AccountValidationFunction
+
+  MigrationWorkflowArn:
+    Description: Step Functions workflow ARN
+    Value: !Ref MigrationWorkflow
+
+
